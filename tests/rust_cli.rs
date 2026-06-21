@@ -673,6 +673,48 @@ fn does_not_index_subagent_content() {
     assert!(!output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("No matching sessions found"), "{stdout}");
+
+    let worker_index = Command::new(env!("CARGO_BIN_EXE_agent-session-find"))
+        .args([
+            "--codex-home",
+            codex_home.to_str().unwrap(),
+            "--db",
+            db.to_str().unwrap(),
+            "--source",
+            "codex",
+            "--workers",
+            "index",
+        ])
+        .status()
+        .unwrap();
+    assert!(worker_index.success());
+
+    let worker_output = Command::new(env!("CARGO_BIN_EXE_agent-session-find"))
+        .args([
+            "--codex-home",
+            codex_home.to_str().unwrap(),
+            "--db",
+            db.to_str().unwrap(),
+            "--source",
+            "codex",
+            "--workers",
+            "--no-refresh",
+            "export ui bugs worker",
+        ])
+        .output()
+        .unwrap();
+    assert!(worker_output.status.success());
+    let stdout = String::from_utf8(worker_output.stdout).unwrap();
+    assert!(
+        stdout.contains("66666666-6666-4666-8666-666666666666"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("session: worker/subagent"), "{stdout}");
+    assert!(
+        stdout.contains("parent: 55555555-5555-4555-8555-555555555555"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("not a normal sidebar thread"), "{stdout}");
 }
 
 #[test]
@@ -1166,7 +1208,7 @@ fn skips_internal_skill_load_payloads() {
 }
 
 #[test]
-fn does_not_index_subagent_notification_payloads() {
+fn indexes_compact_subagent_notification_payloads() {
     let root = unique_temp_dir();
     let codex_home = root.join("codex");
     let sessions = codex_home.join("sessions/2026/06/20");
@@ -1178,7 +1220,8 @@ fn does_not_index_subagent_notification_payloads() {
         lines(&[
             r#"{"timestamp":"2026-06-20T05:00:00Z","type":"session_meta","payload":{"id":"88888888-8888-4888-8888-888888888888","cwd":"/Users/jessemerhi/repos/example_repo","thread_source":"user"}}"#,
             r#"{"timestamp":"2026-06-20T05:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"This parent session should stay indexed for normal agent context."}}"#,
-            r#"{"timestamp":"2026-06-20T05:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"<subagent_notification>{\"agent_path\":\"worker\",\"status\":{\"completed\":\"notification only spectral banana phrase\"}}</subagent_notification>"}}"#,
+            r#"{"timestamp":"2026-06-20T05:00:02Z","type":"response_item","payload":{"type":"function_call","name":"spawn_agent","arguments":"{\"message\":\"Read the handoff document before acting: /tmp/effect-rule-pr-handoff.md. Focus: implement eslint-plugin-react-you-might-not-need-an-effect.\"}"}}"#,
+            r#"{"timestamp":"2026-06-20T05:00:03Z","type":"event_msg","payload":{"type":"user_message","message":"<subagent_notification>{\"agent_path\":\"worker\",\"status\":{\"completed\":\"Done. Opened draft PR #505 on branch jesse/effect-discipline-eslint for notification only spectral banana phrase\"}}</subagent_notification>"}}"#,
         ]),
     )
     .unwrap();
@@ -1212,6 +1255,27 @@ fn does_not_index_subagent_notification_payloads() {
         .unwrap();
     assert!(parent.status.success());
 
+    let handoff = Command::new(env!("CARGO_BIN_EXE_agent-session-find"))
+        .args([
+            "--codex-home",
+            codex_home.to_str().unwrap(),
+            "--db",
+            db.to_str().unwrap(),
+            "--source",
+            "codex",
+            "--no-refresh",
+            "effect rule handoff eslint",
+        ])
+        .output()
+        .unwrap();
+    assert!(handoff.status.success());
+    let stdout = String::from_utf8(handoff.stdout).unwrap();
+    assert!(
+        stdout.contains("88888888-8888-4888-8888-888888888888"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("effect-rule-pr-handoff"), "{stdout}");
+
     let notification = Command::new(env!("CARGO_BIN_EXE_agent-session-find"))
         .args([
             "--codex-home",
@@ -1221,13 +1285,14 @@ fn does_not_index_subagent_notification_payloads() {
             "--source",
             "codex",
             "--no-refresh",
-            "spectral banana phrase",
+            "PR 505 effect discipline",
         ])
         .output()
         .unwrap();
-    assert!(!notification.status.success());
+    assert!(notification.status.success());
     let stdout = String::from_utf8(notification.stdout).unwrap();
-    assert!(stdout.contains("No matching sessions found"), "{stdout}");
+    assert!(stdout.contains("draft PR #505"), "{stdout}");
+    assert!(stdout.contains("session: full"), "{stdout}");
 }
 
 #[test]

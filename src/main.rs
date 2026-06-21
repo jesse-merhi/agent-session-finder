@@ -27,6 +27,7 @@ struct Config {
     cwd: Option<String>,
     no_refresh: bool,
     no_archived: bool,
+    include_workers: bool,
     limit: usize,
     max_sources: Option<usize>,
     index_since: Option<Duration>,
@@ -82,6 +83,7 @@ struct SearchRow {
     updated_at: String,
     source_path: String,
     session_kind: String,
+    parent_thread_id: String,
     category: String,
     body: String,
     rank: f64,
@@ -95,6 +97,7 @@ struct ResultCard {
     updated_at: String,
     source_path: String,
     session_kind: String,
+    parent_thread_id: String,
     categories: BTreeSet<String>,
     snippets: Vec<String>,
     matched_terms: BTreeSet<String>,
@@ -177,6 +180,7 @@ fn parse_args(args: Vec<String>) -> AppResult<Config> {
         cwd: None,
         no_refresh: false,
         no_archived: false,
+        include_workers: false,
         limit: 10,
         max_sources: None,
         index_since: None,
@@ -214,6 +218,9 @@ fn parse_args(args: Vec<String>) -> AppResult<Config> {
             }
             "--no-refresh" => config.no_refresh = true,
             "--no-archived" => config.no_archived = true,
+            "--workers" | "--include-workers" | "--include-subagents" => {
+                config.include_workers = true
+            }
             "--no-logs" => {}
             "--cwd" => {
                 index += 1;
@@ -257,7 +264,7 @@ fn print_help() -> AppResult<()> {
     let mut stdout = io::stdout().lock();
     write_io(writeln!(
         stdout,
-        "usage: agent-session-find [--db PATH] [--source all|codex|claude] [--cwd TEXT] [--since 2d] [--index-since 2d] [--max-sources N] [--no-refresh] [--limit N] [index|status|QUERY...]"
+        "usage: agent-session-find [--db PATH] [--source all|codex|claude] [--cwd TEXT] [--since 2d] [--index-since 2d] [--max-sources N] [--workers] [--no-refresh] [--limit N] [index|status|QUERY...]"
     ))?;
     write_io(writeln!(stdout))?;
     write_io(writeln!(
@@ -579,7 +586,7 @@ fn index_all(conn: &mut Connection, config: &Config) -> AppResult<IndexSummary> 
                 continue;
             }
         }
-        if !is_claude_source(&source, &config.claude_home) {
+        if !config.include_workers && !is_claude_source(&source, &config.claude_home) {
             if let Some((_, _, session_kind)) = codex_thread_info(&source)? {
                 if session_kind == "subagent" {
                     delete_source_docs(&tx, &source)?;
@@ -589,7 +596,7 @@ fn index_all(conn: &mut Connection, config: &Config) -> AppResult<IndexSummary> 
                 }
             }
         }
-        if source_unchanged(&tx, &source)? {
+        if source_unchanged(&tx, &source, config.include_workers)? {
             skipped += 1;
             continue;
         }
@@ -609,10 +616,11 @@ fn index_all(conn: &mut Connection, config: &Config) -> AppResult<IndexSummary> 
         } else {
             parse_codex_file(&source)?
         };
-        if meta
-            .as_ref()
-            .map(|meta| meta.session_kind == "subagent")
-            .unwrap_or(false)
+        if !config.include_workers
+            && meta
+                .as_ref()
+                .map(|meta| meta.session_kind == "subagent")
+                .unwrap_or(false)
         {
             mark_source(&tx, &source, source_kind)?;
             filtered += 1;
@@ -842,7 +850,10 @@ fn parse_codex_file(path: &Path) -> AppResult<(Vec<RawDoc>, Option<SessionMeta>)
         if row_type == "event_msg" {
             match text_at(payload, &["type"]).as_str() {
                 "user_message" => {
-                    maybe_doc = Some(("user", "user_prompt", text_at(payload, &["message"])))
+                    let message = text_at(payload, &["message"]);
+                    maybe_doc = compact_subagent_notification(&message)
+                        .map(|summary| ("assistant", "worker_summary", summary))
+                        .or_else(|| Some(("user", "user_prompt", message)));
                 }
                 "agent_message" => {
                     maybe_doc = Some((
@@ -1246,7 +1257,7 @@ fn delete_source_docs(conn: &Connection, path: &Path) -> AppResult<()> {
     Ok(())
 }
 
-fn source_unchanged(conn: &Connection, path: &Path) -> AppResult<bool> {
+fn source_unchanged(conn: &Connection, path: &Path, include_workers: bool) -> AppResult<bool> {
     let source = path.display().to_string();
     let Some((stored_mtime_ns, stored_mtime_ms, stored_size)) = conn
         .query_row(
@@ -1270,7 +1281,21 @@ fn source_unchanged(conn: &Connection, path: &Path) -> AppResult<bool> {
     } else {
         stored_mtime_ms == mtime_ms(&metadata)?
     };
-    Ok(same_mtime && stored_size == metadata.len() as i64)
+    if !same_mtime || stored_size != metadata.len() as i64 {
+        return Ok(false);
+    }
+    if include_workers {
+        let source = path.display().to_string();
+        let has_docs: i64 = conn.query_row(
+            "select exists(select 1 from docs where source_path=?1 limit 1)",
+            [&source],
+            |row| row.get(0),
+        )?;
+        if has_docs == 0 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn mark_source(conn: &Connection, path: &Path, source_kind: &str) -> AppResult<()> {
@@ -1318,6 +1343,7 @@ fn search(conn: &Connection, config: &Config) -> AppResult<Vec<ResultCard>> {
     let cwd = config.cwd.as_deref().unwrap_or_default();
     let since_seconds = search_since_seconds(config);
     let exclude_archived = i64::from(config.no_archived);
+    let include_workers = i64::from(config.include_workers);
     let mut stmt = conn.prepare(
         r#"
         select d.session_id,
@@ -1326,6 +1352,7 @@ fn search(conn: &Connection, config: &Config) -> AppResult<Vec<ResultCard>> {
                coalesce(nullif(s.updated_at,''), d.timestamp) as updated_at,
                coalesce(nullif(s.source_path,''), d.source_path) as source_path,
                coalesce(nullif(s.session_kind,''), d.session_kind) as session_kind,
+               coalesce(nullif(s.parent_thread_id,''), '') as parent_thread_id,
                d.category,
                d.body
         from docs_fts
@@ -1339,14 +1366,21 @@ fn search(conn: &Connection, config: &Config) -> AppResult<Vec<ResultCard>> {
                or instr(d.source_path, ?3) > 0)
           and (?4 = 0 or unixepoch(coalesce(nullif(s.updated_at,''), d.timestamp)) >= unixepoch('now') - ?4)
           and (?5 = 0 or d.source_path not like '%/archived_sessions/%')
-          and coalesce(nullif(s.session_kind,''), d.session_kind) != 'subagent'
+          and (?6 = 1 or coalesce(nullif(s.session_kind,''), d.session_kind) != 'subagent')
         order by bm25(docs_fts), coalesce(nullif(s.updated_at,''), d.timestamp) desc
         limit 1200
         "#,
     )?;
     let rows = stmt
         .query_map(
-            params![fts, source_prefix, cwd, since_seconds, exclude_archived],
+            params![
+                fts,
+                source_prefix,
+                cwd,
+                since_seconds,
+                exclude_archived,
+                include_workers
+            ],
             |row| {
                 Ok(SearchRow {
                     session_id: row.get(0)?,
@@ -1355,8 +1389,9 @@ fn search(conn: &Connection, config: &Config) -> AppResult<Vec<ResultCard>> {
                     updated_at: row.get(3)?,
                     source_path: row.get(4)?,
                     session_kind: row.get(5)?,
-                    category: row.get(6)?,
-                    body: row.get(7)?,
+                    parent_thread_id: row.get(6)?,
+                    category: row.get(7)?,
+                    body: row.get(8)?,
                     rank: 0.0,
                 })
             },
@@ -1375,6 +1410,7 @@ fn search_metadata(
     let cwd = config.cwd.as_deref().unwrap_or_default();
     let since_seconds = search_since_seconds(config);
     let exclude_archived = i64::from(config.no_archived);
+    let include_workers = i64::from(config.include_workers);
     let mut stmt = conn.prepare(
         r#"
         select d.session_id,
@@ -1383,6 +1419,7 @@ fn search_metadata(
                coalesce(nullif(s.updated_at,''), d.timestamp) as updated_at,
                coalesce(nullif(s.source_path,''), d.source_path) as source_path,
                coalesce(nullif(s.session_kind,''), d.session_kind) as session_kind,
+               coalesce(nullif(s.parent_thread_id,''), '') as parent_thread_id,
                d.category,
                d.body
         from docs d
@@ -1395,14 +1432,20 @@ fn search_metadata(
                or instr(d.source_path, ?2) > 0)
           and (?3 = 0 or unixepoch(coalesce(nullif(s.updated_at,''), d.timestamp)) >= unixepoch('now') - ?3)
           and (?4 = 0 or d.source_path not like '%/archived_sessions/%')
-          and coalesce(nullif(s.session_kind,''), d.session_kind) != 'subagent'
+          and (?5 = 1 or coalesce(nullif(s.session_kind,''), d.session_kind) != 'subagent')
         order by coalesce(nullif(s.updated_at,''), d.timestamp) desc
         limit 1200
         "#,
     )?;
     let rows = stmt
         .query_map(
-            params![source_prefix, cwd, since_seconds, exclude_archived],
+            params![
+                source_prefix,
+                cwd,
+                since_seconds,
+                exclude_archived,
+                include_workers
+            ],
             |row| {
                 Ok(SearchRow {
                     session_id: row.get(0)?,
@@ -1411,8 +1454,9 @@ fn search_metadata(
                     updated_at: row.get(3)?,
                     source_path: row.get(4)?,
                     session_kind: row.get(5)?,
-                    category: row.get(6)?,
-                    body: row.get(7)?,
+                    parent_thread_id: row.get(6)?,
+                    category: row.get(7)?,
+                    body: row.get(8)?,
                     rank: 0.0,
                 })
             },
@@ -1454,6 +1498,7 @@ fn result_cards_from_rows(
                 updated_at: row.updated_at.clone(),
                 source_path: row.source_path.clone(),
                 session_kind: normalized_session_kind(&row.session_kind, &row.title, &row.body),
+                parent_thread_id: row.parent_thread_id.clone(),
                 categories: BTreeSet::new(),
                 snippets: Vec::new(),
                 matched_terms: BTreeSet::new(),
@@ -1466,6 +1511,9 @@ fn result_cards_from_rows(
         {
             entry.session_kind = normalized_session_kind(&row.session_kind, &row.title, &row.body);
         }
+        if entry.parent_thread_id.is_empty() && !row.parent_thread_id.is_empty() {
+            entry.parent_thread_id = row.parent_thread_id.clone();
+        }
         entry.best_row_terms = entry.best_row_terms.max(matched.len());
         entry.categories.insert(row.category.clone());
         entry.matched_terms.extend(matched);
@@ -1474,7 +1522,9 @@ fn result_cards_from_rows(
         }
     }
     let mut results: Vec<_> = grouped.into_values().collect();
-    results.retain(|result| result.session_kind != "subagent");
+    if !config.include_workers {
+        results.retain(|result| result.session_kind != "subagent");
+    }
     results.sort_by(|a, b| {
         b.matched_terms
             .len()
@@ -1521,7 +1571,16 @@ fn print_results(results: &[ResultCard], query: &str, limit: usize) -> AppResult
             categories,
             result.rank
         ))?;
-        write_io(writeln!(stdout, "   session: {}", result.session_kind))?;
+        write_io(writeln!(stdout, "   session: {}", session_display(result)))?;
+        if result.session_kind == "subagent" {
+            if !result.parent_thread_id.is_empty() {
+                write_io(writeln!(stdout, "   parent: {}", result.parent_thread_id))?;
+            }
+            write_io(writeln!(
+                stdout,
+                "   note: worker transcript JSONL; not a normal sidebar thread"
+            ))?;
+        }
         let terms = result
             .matched_terms
             .iter()
@@ -1542,6 +1601,14 @@ fn print_results(results: &[ResultCard], query: &str, limit: usize) -> AppResult
         write_io(writeln!(stdout))?;
     }
     Ok(())
+}
+
+fn session_display(result: &ResultCard) -> String {
+    if result.session_kind == "subagent" {
+        "worker/subagent".to_string()
+    } else {
+        result.session_kind.clone()
+    }
 }
 
 fn write_io<T>(result: io::Result<T>) -> AppResult<T> {
@@ -1688,7 +1755,7 @@ fn matched_terms(row: &SearchRow, terms: &[String]) -> Vec<String> {
 
 fn row_rank(row: &SearchRow, terms: &[String], matched_count: usize) -> f64 {
     let category_weight = match row.category.as_str() {
-        "metadata" | "conversation_window" | "user_prompt" => 4.0,
+        "metadata" | "conversation_window" | "user_prompt" | "worker_summary" => 4.0,
         "assistant_message" => 2.0,
         "tool_command" => 1.0,
         "error_text" => 0.7,
@@ -1853,15 +1920,59 @@ fn compact_function_call(payload: &Value) -> String {
     let args = text_at(payload, &["arguments"]);
     if let Ok(json) = serde_json::from_str::<Value>(&args) {
         let mut parts = vec![name];
-        for key in ["cmd", "command", "workdir", "query", "path"] {
+        for key in [
+            "cmd",
+            "command",
+            "description",
+            "message",
+            "objective",
+            "prompt",
+            "query",
+            "task",
+            "workdir",
+            "path",
+        ] {
             let value = text_at(&json, &[key]);
             if !value.is_empty() {
-                parts.push(format!("{key}: {value}"));
+                parts.push(format!("{key}: {}", trim(&value, 1_200)));
             }
         }
         return parts.join("\n");
     }
     format!("{name}\n{args}")
+}
+
+fn compact_subagent_notification(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let json_text = trimmed
+        .strip_prefix("<subagent_notification>")?
+        .strip_suffix("</subagent_notification>")
+        .unwrap_or(trimmed)
+        .trim();
+    let Ok(value) = serde_json::from_str::<Value>(json_text) else {
+        return Some(format!(
+            "worker notification\n{}",
+            trim(json_text.trim_matches(|ch| ch == '<' || ch == '>'), 2_000)
+        ));
+    };
+    let mut parts = vec!["worker notification".to_string()];
+    for (label, path) in [
+        ("agent", &["agent_path"][..]),
+        ("id", &["agent_id"][..]),
+        ("thread", &["thread_id"][..]),
+        ("session", &["session_id"][..]),
+        ("completed", &["status", "completed"][..]),
+        ("failed", &["status", "failed"][..]),
+        ("error", &["status", "error"][..]),
+        ("message", &["status", "message"][..]),
+        ("current", &["status", "current_message"][..]),
+    ] {
+        let value = text_at(&value, path);
+        if !value.is_empty() {
+            parts.push(format!("{label}: {}", trim(&value, 2_000)));
+        }
+    }
+    Some(parts.join("\n"))
 }
 
 fn compact_custom_tool_call(payload: &Value) -> String {
@@ -2265,6 +2376,7 @@ mod tests {
             updated_at: String::new(),
             source_path: "/tmp/rollout.jsonl".to_string(),
             session_kind: "full".to_string(),
+            parent_thread_id: String::new(),
             category: "conversation_window".to_string(),
             body: "This talks about export types and auditability, not the UI.".to_string(),
             rank: 0.0,
@@ -2296,6 +2408,7 @@ mod tests {
             updated_at: String::new(),
             source_path: "/tmp/rollout.jsonl".to_string(),
             session_kind: "full".to_string(),
+            parent_thread_id: String::new(),
             category: "conversation_window".to_string(),
             body: "Please run the test audit pass before shipping.".to_string(),
             rank: 0.0,

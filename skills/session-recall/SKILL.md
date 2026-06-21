@@ -54,11 +54,17 @@ agent-session-find --source claude "mobile build workflow"
 
 4. If nothing matches, widen gradually: increase `--index-since`, remove `--cwd`, try synonyms, then omit `--max-sources` for a fuller local refresh.
 
-5. If running several follow-up searches against the same index, add `--no-refresh` after the first successful refresh.
+5. If the user mentions a handoff, worker, subagent, delegated implementation, reviewer pass, branch, commit, or PR opened by another agent, retry with `--workers`. Normal recall excludes worker transcripts by default, but parent sessions keep compact worker handoff/completion summaries.
 
-6. Inspect the low-token result cards first. Prefer results with matching `cwd`, `repo`, `terms`, recent timestamp, and `session: full`.
+```sh
+agent-session-find --workers --cwd example_repo "effect discipline eslint PR"
+```
 
-7. Open or grep the source path only after choosing a likely result. Pull only the narrow lines needed for the task.
+6. If running several follow-up searches against the same index, add `--no-refresh` after the first successful refresh.
+
+7. Inspect the low-token result cards first. Prefer results with matching `cwd`, `repo`, `terms`, recent timestamp, and `session: full`. Prefer `session: worker/subagent` only when the user is specifically asking for delegated worker output.
+
+8. Open or grep the source path only after choosing a likely result. Pull only the narrow lines needed for the task. For `session: worker/subagent`, treat the result as a local transcript, not a normal user-owned sidebar thread; use `src` for the JSONL and `parent` for the coordinator session.
 
 ## Query Strategy
 
@@ -68,6 +74,7 @@ Use the words the user or agent likely typed, not a perfect summary. Good query 
 - visible feature words: `export ui`, `mobile build`, `database restore`
 - error text or symbols: `missing_symbol`, `No such file`
 - workflow labels: `code review`, `test-audit`, `installer`
+- delegation labels: `handoff`, `worker`, `subagent`, `PR 505`, `branch`
 - file or command fragments: `Cargo.toml`, `install.sh`, `bun run check`
 
 Run two or three short searches instead of one long paragraph. Keep exact phrases for rare terms and use broader words for fuzzy recall.
@@ -80,9 +87,12 @@ Treat search results as routing metadata:
 - `match` and `terms` show why it matched.
 - `cwd` and `repo` tell whether it belongs to the current codebase.
 - `session id` and `source` point to the local JSONL if deeper inspection is needed.
+- `session: worker/subagent` means a delegated Codex Desktop worker transcript. It is searchable local JSONL, but may not be reopenable or unarchivable through normal Codex thread APIs.
 - snippets are enough for most routing decisions.
 
 Do not assume a result proves the old decision is still correct. Use it to find context, then verify current code or docs before acting.
+
+Do not create, restore, archive, pin, rename, or mutate Codex threads while doing recall unless the user explicitly delegated thread orchestration. If a worker transcript needs restore investigation, pause before changing Codex app SQLite state.
 
 ## Defaults
 
