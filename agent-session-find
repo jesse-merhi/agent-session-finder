@@ -1,0 +1,19 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+if [ -x "$SCRIPT_DIR/target/release/agent-session-find" ]; then
+  exec "$SCRIPT_DIR/target/release/agent-session-find" "$@"
+fi
+
+if [ -x "$SCRIPT_DIR/target/debug/agent-session-find" ]; then
+  exec "$SCRIPT_DIR/target/debug/agent-session-find" "$@"
+fi
+
+if command -v cargo >/dev/null 2>&1 && [ -f "$SCRIPT_DIR/Cargo.toml" ]; then
+  exec cargo run --quiet --manifest-path "$SCRIPT_DIR/Cargo.toml" --bin agent-session-find -- "$@"
+fi
+
+echo "agent-session-find: build the Rust binary first: cargo build --release --bin agent-session-find" >&2
+exit 127
