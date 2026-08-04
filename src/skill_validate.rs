@@ -17,6 +17,10 @@ fn run() -> Result<(), String> {
         print_help();
         return Ok(());
     }
+    if args.iter().any(|arg| arg == "-V" || arg == "--version") {
+        println!("agent-skill-validate {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
 
     let inputs = if args.is_empty() {
         vec![PathBuf::from("skills")]
@@ -63,7 +67,8 @@ fn print_help() {
         "Validate local Codex skill folders\n\n\
 usage: agent-skill-validate [PATH ...]\n\n\
 PATH may be a skill folder, a SKILL.md file, or a directory containing skill folders.\n\
-With no PATH, validates ./skills."
+With no PATH, validates ./skills.\n\n\
+Options:\n  -h, --help       Show help\n  -V, --version    Show version"
     );
 }
 

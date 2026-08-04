@@ -2,6 +2,10 @@
 name = "agent-session-finder"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+description = "Search local Codex and Claude session stores from the command line."
+repository = "https://github.com/jesse-merhi/agent-session-finder"
+readme = "README.md"
 
 [[bin]]
 name = "agent-session-find"

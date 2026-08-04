@@ -1,83 +1,119 @@
-# Local Agent Session Finder
+# Agent Session Finder
 
-Local-first CLI for finding Codex and Claude sessions by prompt text, repo/cwd, file paths, and real errors.
+`agent-session-find` is a local CLI for developers who need to find Codex and Claude sessions by prompt text, repository, working directory, file path, or error message.
 
-It reads local stores only:
+## Why
 
-- `~/.codex/sessions/**/*.jsonl`
-- `~/.codex/archived_sessions/**/*.jsonl`
-- `~/.claude/transcripts/*.jsonl`
-- `~/.claude/projects/*/*.jsonl`
-
-Session contents stay on the machine. The index is a local SQLite FTS5 database at `~/.agent-session-finder.sqlite` by default.
-
-The index is compact by design. It stores metadata, each user prompt with the next 3 assistant/tool messages, short parent-session worker handoff/completion summaries, and short standalone failure snippets. It skips giant successful tool output.
+Agent histories are split across timestamped JSONL files and are difficult to search by memory. The finder builds a compact SQLite FTS5 index and returns low-token result cards; the companion `agent-skill-validate` binary checks local Codex skill folders without Python or PyYAML.
 
 ## Install
 
-```sh
-./install.sh
-```
+### Prebuilt binaries
 
-That builds the Rust release binaries and copies `agent-session-find` plus `agent-skill-validate` to `~/.local/bin`. If that directory is not on your `PATH`, the installer prints the line to add.
-
-To install somewhere else:
+Choose one release target: `aarch64-apple-darwin`, `x86_64-apple-darwin`, or `x86_64-unknown-linux-gnu`.
 
 ```sh
-./install.sh --bin-dir /usr/local/bin
-./install.sh --prefix "$HOME/.cargo"
+VERSION=v0.1.0
+TARGET=aarch64-apple-darwin
+ARCHIVE="agent-session-finder-${VERSION}-${TARGET}.tar.gz"
+curl -LO "https://github.com/jesse-merhi/agent-session-finder/releases/download/${VERSION}/${ARCHIVE}"
+curl -LO "https://github.com/jesse-merhi/agent-session-finder/releases/download/${VERSION}/SHA256SUMS"
+grep " ${ARCHIVE}$" SHA256SUMS | shasum -a 256 -c -
+tar -xzf "$ARCHIVE"
+install -m 0755 "agent-session-finder-${VERSION}-${TARGET}/agent-session-find" "$HOME/.local/bin/"
+install -m 0755 "agent-session-finder-${VERSION}-${TARGET}/agent-skill-validate" "$HOME/.local/bin/"
 ```
 
-From this checkout, you can also run the local wrapper directly. It prefers an already-built Rust binary and falls back to `cargo run`.
+Replace `VERSION` with an available release tag and `TARGET` with your platform.
+
+### Build with Cargo
 
 ```sh
-./agent-session-find --index-since 2d --max-sources 80 --no-logs "example_repo export ui"
+cargo install --locked --git https://github.com/jesse-merhi/agent-session-finder
 ```
 
-Validate the bundled recall skill without Python or PyYAML:
+From a clone, `./install.sh` builds both binaries and installs them to `$HOME/.local/bin`. Use `./install.sh --help` for alternate destinations.
+
+## Usage
+
+Search all local sessions; an empty index is refreshed automatically:
+
+```text
+$ agent-session-find "login redirect"
+1. Repair Google sign-in redirect
+   match: 2/2  kind: user_prompt,assistant_message  score: 18.4
+   session: full
+   terms: login,redirect
+   cwd: /Users/alex/repos/web-app
+   id:  8b6a9f44-1c37-4fc3-8f21-9f28a76c13f4
+   src: /Users/alex/.codex/sessions/2026/08/03/rollout-...jsonl
+```
+
+Build or inspect the index explicitly:
 
 ```sh
-./agent-skill-validate skills/session-recall
+agent-session-find index --index-since 14d --max-sources 100
+agent-session-find status
+agent-session-find --source claude --cwd web-app "mobile build"
+agent-session-find --workers "eslint review"
+agent-skill-validate skills/session-recall
 ```
 
-## Search
+No match is a non-zero exit so scripts can distinguish it from success.
 
-```sh
-./agent-session-find "restore db walk me through"
-./agent-session-find --index-since 14d "example_repo export ui"
-./agent-session-find --source claude "mobile build workflow"
-./agent-session-find --source codex "review state tracker"
-./agent-session-find --workers "effect discipline eslint PR"
-```
+## Configuration
 
-Results are deliberately low-token: title, match count, session kind, matched terms, cwd, session id, source rollout path, and one or two snippets. Codex subagent/worker sessions are excluded from indexing and search by default. Use `--workers` when the thing you need was explicitly handed off to a worker, subagent, reviewer, or PR-opening implementation agent.
+Environment variables:
 
-### Worker/subagent sessions
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `AGENT_SESSION_FINDER_CODEX_HOME` | `$CODEX_HOME` or `$HOME/.codex` | Codex session store. |
+| `CODEX_HOME` | `$HOME/.codex` | Native Codex store override. |
+| `AGENT_SESSION_FINDER_CLAUDE_HOME` | `$CLAUDE_CONFIG_DIR` or `$HOME/.claude` | Claude session store. |
+| `CLAUDE_CONFIG_DIR` | `$HOME/.claude` | Native Claude store override. |
+| `AGENT_SESSION_FINDER_DB` | see below | SQLite index path. |
+| `XDG_CACHE_HOME` | unset | When set, the default index is `$XDG_CACHE_HOME/agent-session-finder/index.sqlite`; otherwise it is `$HOME/.agent-session-finder.sqlite`. |
+| `HOME` | system home | Base for default stores and index. |
+| `BIN_DIR` | unset | Installer destination directory. |
+| `PREFIX` | unset | Installer prefix; binaries go in `PREFIX/bin`. |
+| `PROFILE` | `release` | Installer build profile: `release` or `debug`. |
+| `CARGO_TARGET_DIR` | Cargo default | Alternate build-output directory used by the installer. |
 
-Codex Desktop worker sessions are Codex-generated local JSONL transcripts, but they are not normal user-owned sidebar threads. When `--workers` returns `session: worker/subagent`, use the `src` path to inspect the local transcript and the `parent` id to find the coordinator session. The Codex app thread API may not reopen or unarchive a worker transcript by id like a normal sidebar thread.
+`agent-session-find` flags:
 
-Parent sessions stay searchable without `--workers` through compact handoff/completion summaries, so queries for PR numbers, branches, handoff paths, or delegated task prompts can often find the coordinator first. Avoid changing Codex app SQLite state for restore attempts unless the user explicitly asks for that investigation and you have a backup.
+| Flag | Purpose |
+| --- | --- |
+| `--codex-home PATH` | Override the Codex store. |
+| `--claude-home PATH` | Override the Claude store. |
+| `--db PATH` | Override the SQLite index. |
+| `--source all\|codex\|claude` | Select stores; default is `all`. |
+| `--cwd TEXT` | Restrict matches by working directory or repository. |
+| `--since 6h\|2d\|1w` | Restrict results by age. |
+| `--index-since 6h\|2d\|1w` | Restrict indexed source files by age. |
+| `--max-sources N` | Bound the source files processed. |
+| `--workers` | Include Codex worker/subagent sessions. `--include-workers` and `--include-subagents` are aliases. |
+| `--no-archived` | Exclude archived Codex sessions. |
+| `--no-refresh` | Search the existing index without refreshing. |
+| `--no-logs` | Accepted as a deprecated no-op for older scripts. |
+| `--limit N` | Set the maximum result count; default is `10`. |
+| `-h`, `--help` | Show help. |
+| `-V`, `--version` | Show version. |
 
-## Index
+`agent-skill-validate` accepts skill folders, `SKILL.md` files, or directories containing skills. With no path it checks `./skills`; its flags are `-h`/`--help` and `-V`/`--version`.
 
-```sh
-./agent-session-find index
-./agent-session-find index --index-since 30d
-./agent-session-find index --source claude
-```
+`install.sh` accepts `--bin-dir DIR`, `--prefix DIR`, `--profile release|debug`, `--no-build`, and `-h`/`--help`. Matching environment variables are listed above.
 
-For a bounded first run:
+## Privacy and local-only behavior
 
-```sh
-./agent-session-find index --index-since 7d --max-sources 100
-```
+Session files and the SQLite index stay on your machine. The program makes no network requests. It indexes metadata, user prompts with a small following context window, compact worker handoff summaries, and short failure snippets while skipping large successful tool output. Worker transcripts are excluded unless `--workers` is set.
 
-## Status
+## Requirements
 
-```sh
-./agent-session-find status
-```
+- macOS on Apple Silicon or Intel, or x86-64 Linux, for the supplied archives
+- a current stable Rust toolchain when building from source
+- readable local Codex and/or Claude session stores
+- a C toolchain when compiling bundled SQLite from source
 
-## Background Indexing
+## License
 
-Manual searches auto-index an empty database, and `index` can be run from cron or launchd.
+MIT. See [LICENSE](LICENSE).

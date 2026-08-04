@@ -70,7 +70,7 @@ case "$PROFILE" in
     ;;
 esac
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 
 if [ "$BUILD" -eq 1 ]; then
   if [ "$PROFILE" = release ]; then

@@ -32,7 +32,7 @@ fn install_script_copies_rust_binary_to_requested_bin_dir() {
     assert!(installed.is_file());
     assert!(validator.is_file());
 
-    let output = Command::new(installed).arg("--help").output().unwrap();
+    let output = Command::new(&installed).arg("--help").output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
@@ -40,11 +40,95 @@ fn install_script_copies_rust_binary_to_requested_bin_dir() {
         "{stdout}"
     );
 
-    let output = Command::new(validator).arg("--help").output().unwrap();
+    let output = Command::new(&validator).arg("--help").output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
         stdout.contains("Validate local Codex skill folders"),
+        "{stdout}"
+    );
+
+    let output = Command::new(&installed).arg("--version").output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "agent-session-find 0.1.0"
+    );
+
+    let output = Command::new(&validator).arg("--version").output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "agent-skill-validate 0.1.0"
+    );
+}
+
+#[test]
+fn reports_missing_store_and_invalid_options_without_panicking() {
+    let root = unique_temp_dir();
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-session-find"))
+        .args(["--source", "codex", "--codex-home"])
+        .arg(root.join("missing-codex"))
+        .args(["--db"])
+        .arg(root.join("index.sqlite"))
+        .arg("index")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("Codex session store not found"), "{stderr}");
+    assert!(stderr.contains("--codex-home"), "{stderr}");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-session-find"))
+        .arg("--unknown")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("unknown option: --unknown"), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+#[test]
+fn help_and_version_do_not_require_home_configuration() {
+    for flag in ["--help", "--version"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_agent-session-find"))
+            .env_remove("HOME")
+            .env_remove("AGENT_SESSION_FINDER_CODEX_HOME")
+            .env_remove("CODEX_HOME")
+            .env_remove("AGENT_SESSION_FINDER_CLAUDE_HOME")
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("AGENT_SESSION_FINDER_DB")
+            .arg(flag)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{flag}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn default_index_honors_xdg_cache_home() {
+    let root = unique_temp_dir();
+    let cache_home = root.join("cache");
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-session-find"))
+        .env("HOME", &root)
+        .env("XDG_CACHE_HOME", &cache_home)
+        .arg("status")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains(
+            cache_home
+                .join("agent-session-finder/index.sqlite")
+                .to_str()
+                .unwrap()
+        ),
         "{stdout}"
     );
 }

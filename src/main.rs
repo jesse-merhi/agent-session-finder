@@ -7,7 +7,6 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const DEFAULT_DB: &str = "~/.agent-session-finder.sqlite";
 const MAX_BODY_CHARS: usize = 6_000;
 const CONTEXT_DOCS: usize = 3;
 const MAX_STANDALONE_ERRORS: usize = 5;
@@ -113,7 +112,19 @@ fn main() {
 }
 
 fn run() -> AppResult<()> {
-    let config = parse_args(env::args().skip(1).collect())?;
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
+        print_help()?;
+        return Ok(());
+    }
+    if args.iter().any(|arg| arg == "-V" || arg == "--version") {
+        println!("agent-session-find {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    let config = parse_args(args)?;
+    if config.command == CommandKind::Index {
+        validate_source_stores(&config)?;
+    }
     let mut conn = open_db(&config.db)?;
 
     match config.command {
@@ -143,6 +154,7 @@ fn run() -> AppResult<()> {
         }
         CommandKind::Search => {
             if !config.no_refresh && source_scope_needs_auto_index(&conn, &config)? {
+                validate_source_stores(&config)?;
                 index_all(&mut conn, &config)?;
             }
             let results = search(&conn, &config)?;
@@ -171,9 +183,13 @@ struct IndexSummary {
 
 fn parse_args(args: Vec<String>) -> AppResult<Config> {
     let mut config = Config {
-        codex_home: expand_home("~/.codex"),
-        claude_home: expand_home("~/.claude"),
-        db: expand_home(DEFAULT_DB),
+        codex_home: default_store_path("AGENT_SESSION_FINDER_CODEX_HOME", "CODEX_HOME", ".codex")?,
+        claude_home: default_store_path(
+            "AGENT_SESSION_FINDER_CLAUDE_HOME",
+            "CLAUDE_CONFIG_DIR",
+            ".claude",
+        )?,
+        db: default_db_path()?,
         source: Source::All,
         command: CommandKind::Search,
         query: String::new(),
@@ -193,6 +209,10 @@ fn parse_args(args: Vec<String>) -> AppResult<Config> {
         match args[index].as_str() {
             "-h" | "--help" => {
                 print_help()?;
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                println!("agent-session-find {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             "--codex-home" => {
@@ -246,11 +266,26 @@ fn parse_args(args: Vec<String>) -> AppResult<Config> {
             }
             "index" if query_parts.is_empty() => config.command = CommandKind::Index,
             "status" if query_parts.is_empty() => config.command = CommandKind::Status,
+            other if other.starts_with('-') => {
+                return Err(format!("unknown option: {other}; run --help for usage").into())
+            }
             other => query_parts.push(other.to_string()),
         }
         index += 1;
     }
     config.query = query_parts.join(" ");
+    if config.limit == 0 {
+        return Err("--limit must be greater than zero".into());
+    }
+    if config.max_sources == Some(0) {
+        return Err("--max-sources must be greater than zero".into());
+    }
+    if config.command == CommandKind::Search
+        && config.query.is_empty()
+        && config.cwd.as_deref().unwrap_or_default().is_empty()
+    {
+        return Err("a search query or --cwd filter is required; run --help for usage".into());
+    }
     Ok(config)
 }
 
@@ -264,14 +299,46 @@ fn print_help() -> AppResult<()> {
     let mut stdout = io::stdout().lock();
     write_io(writeln!(
         stdout,
-        "usage: agent-session-find [--db PATH] [--source all|codex|claude] [--cwd TEXT] [--since 2d] [--index-since 2d] [--max-sources N] [--workers] [--no-refresh] [--limit N] [index|status|QUERY...]"
+        "usage: agent-session-find [OPTIONS] QUERY...\n       agent-session-find [OPTIONS] index|status"
     ))?;
     write_io(writeln!(stdout))?;
     write_io(writeln!(
         stdout,
         "Local lightweight session finder for Codex and Claude logs."
     ))?;
+    write_io(writeln!(
+        stdout,
+        "\nOptions:\n  --codex-home PATH       Codex store (default: $CODEX_HOME or ~/.codex)\n  --claude-home PATH      Claude store (default: $CLAUDE_CONFIG_DIR or ~/.claude)\n  --db PATH               SQLite index path\n  --source SOURCE         all, codex, or claude (default: all)\n  --cwd TEXT              Restrict matches by working directory\n  --since DURATION        Restrict results by age (for example 6h, 2d, 1w)\n  --index-since DURATION  Restrict indexing by source age\n  --max-sources N         Bound sources processed during indexing\n  --workers               Include worker/subagent sessions\n  --no-archived           Exclude archived Codex sessions\n  --no-refresh            Search the existing index without refreshing\n  --limit N               Maximum results (default: 10)\n  -h, --help              Show help\n  -V, --version           Show version"
+    ))?;
     Ok(())
+}
+
+fn default_store_path(
+    primary_env: &str,
+    native_env: &str,
+    home_relative: &str,
+) -> AppResult<PathBuf> {
+    if let Some(path) = env::var_os(primary_env).or_else(|| env::var_os(native_env)) {
+        return Ok(PathBuf::from(path));
+    }
+    let home = env::var_os("HOME").ok_or_else(|| {
+        format!("HOME is not set; set HOME or {primary_env} to the session store path")
+    })?;
+    Ok(PathBuf::from(home).join(home_relative))
+}
+
+fn default_db_path() -> AppResult<PathBuf> {
+    if let Some(path) = env::var_os("AGENT_SESSION_FINDER_DB") {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(cache_home) = env::var_os("XDG_CACHE_HOME") {
+        return Ok(PathBuf::from(cache_home)
+            .join("agent-session-finder")
+            .join("index.sqlite"));
+    }
+    let home = env::var_os("HOME")
+        .ok_or_else(|| "HOME is not set; set HOME or AGENT_SESSION_FINDER_DB".to_string())?;
+    Ok(PathBuf::from(home).join(".agent-session-finder.sqlite"))
 }
 
 fn parse_duration(value: &str, flag: &str) -> AppResult<Duration> {
@@ -311,6 +378,30 @@ fn expand_home(path: &str) -> PathBuf {
         }
     }
     PathBuf::from(path)
+}
+
+fn validate_source_stores(config: &Config) -> AppResult<()> {
+    let codex_exists = config.codex_home.is_dir();
+    let claude_exists = config.claude_home.is_dir();
+    match config.source {
+        Source::Codex if !codex_exists => Err(format!(
+            "Codex session store not found at {}; set --codex-home, CODEX_HOME, or AGENT_SESSION_FINDER_CODEX_HOME",
+            config.codex_home.display()
+        )
+        .into()),
+        Source::Claude if !claude_exists => Err(format!(
+            "Claude session store not found at {}; set --claude-home, CLAUDE_CONFIG_DIR, or AGENT_SESSION_FINDER_CLAUDE_HOME",
+            config.claude_home.display()
+        )
+        .into()),
+        Source::All if !codex_exists && !claude_exists => Err(format!(
+            "no session stores found (checked {} and {}); install Codex or Claude, or set a store path override",
+            config.codex_home.display(),
+            config.claude_home.display()
+        )
+        .into()),
+        _ => Ok(()),
+    }
 }
 
 fn open_db(path: &Path) -> AppResult<Connection> {
@@ -853,7 +944,7 @@ fn parse_codex_file(path: &Path) -> AppResult<(Vec<RawDoc>, Option<SessionMeta>)
                     let message = text_at(payload, &["message"]);
                     maybe_doc = compact_subagent_notification(&message)
                         .map(|summary| ("assistant", "worker_summary", summary))
-                        .or_else(|| Some(("user", "user_prompt", message)));
+                        .or(Some(("user", "user_prompt", message)));
                 }
                 "agent_message" => {
                     maybe_doc = Some((
