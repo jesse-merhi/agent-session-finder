@@ -667,7 +667,10 @@ fn reads_worker_messages_from_full_native_search_paths() {
         json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Inspect report_handshake"}]}}),
         json!({"type":"response_item","payload":{"type":"agent_message","author":"/root/worker","recipient":"/root","content":[{"type":"input_text","text":"  worker_result_probe passed\n"}]}}),
         json!({"type":"response_item","payload":{"type":"agent_message","author":"/root/worker","recipient":"/root","content":[{"type":"input_text","text":"  worker_result_probe completed\n"}]}}),
+        json!({"type":"inter_agent_communication","payload":{"author":"/root/worker","recipient":"/root","other_recipients":[],"content":"  worker_result_probe legacy report\n","trigger_turn":false}}),
+        json!({"type":"inter_agent_communication","payload":{"author":"/root/worker","recipient":"/root","other_recipients":[],"content":"  worker_result_probe legacy completion\n","trigger_turn":false}}),
         json!({"type":"response_item","payload":{"type":"agent_message","author":"/root/worker","recipient":"/root","content":[{"type":"encrypted_content","encrypted_content":"worker_result_probe ciphertext"}]}}),
+        json!({"type":"inter_agent_communication","payload":{"author":"/root/worker","recipient":"/root","other_recipients":[],"content":"","encrypted_content":"worker_result_probe ciphertext","trigger_turn":false}}),
     ];
     fs::write(
         &source,
@@ -705,7 +708,7 @@ fn reads_worker_messages_from_full_native_search_paths() {
         .find_map(|line| line.trim().strip_prefix("src: "))
         .unwrap();
     assert_eq!(printed_source, source.to_str().unwrap());
-    for offset in 0..2 {
+    for offset in 0..4 {
         let page = fixture.page(
             &[
                 "--read",
@@ -723,14 +726,14 @@ fn reads_worker_messages_from_full_native_search_paths() {
         assert_eq!(page["source"], printed_source);
         assert_eq!(item["line"], offset + 3);
         assert_eq!(item["kind"], "agent_message");
-        if offset == 0 {
-            assert_eq!(page["next_offset"], 1);
+        if offset < 3 {
+            assert_eq!(page["next_offset"], offset + 1);
         } else {
             assert!(page["next_offset"].is_null());
         }
     }
     let all = fixture.page(&["--read", printed_source], 8192);
-    assert_eq!(all["items"].as_array().unwrap().len(), 3);
+    assert_eq!(all["items"].as_array().unwrap().len(), 5);
 }
 
 #[test]

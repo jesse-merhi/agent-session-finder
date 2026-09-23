@@ -183,6 +183,9 @@ fn read_transcript(options: &Options, page: &mut Page<'_>) -> AppResult<()> {
 
 fn transcript_text(row: &Value, query: &str) -> Vec<(&'static str, String)> {
     let payload = &row["payload"];
+    if row["type"] == "inter_agent_communication" {
+        return vec![("agent_message", content_text(&payload["content"]))];
+    }
     if row["type"] == "response_item" {
         let entry = match payload["type"].as_str().unwrap_or_default() {
             "message" => match payload["role"].as_str() {
