@@ -306,8 +306,6 @@ fn retrieves_supported_tool_records_from_actual_search_result_paths() {
         json!({"type":"session_meta","payload":{"id":"11111111-1111-4111-8111-111111111111","cwd":"/example"}}),
         json!({"type":"event_msg","payload":{"type":"user_message","message":"Run the build"}}),
         json!({"type":"event_msg","payload":{"type":"exec_command_end","exit_code":1,"aggregated_output":"No such file unique_missing_file_needle"}}),
-        json!({"type":"response_item","payload":{"type":"tool_search_call","name":"lookup","input":"search_call_needle"}}),
-        json!({"type":"response_item","payload":{"type":"tool_search_output","output":"Error: search_output_needle"}}),
     ];
     let claude = [
         json!({"type":"user","content":"Find the route","project":"/example"}),
@@ -345,8 +343,6 @@ fn retrieves_supported_tool_records_from_actual_search_result_paths() {
         "unique_missing_file_needle",
         "special_file",
         "flat_result_needle",
-        "search_call_needle",
-        "search_output_needle",
     ] {
         let search = fixture.run(&["--db", "index.sqlite", "--no-refresh", needle]);
         assert!(
@@ -445,5 +441,45 @@ fn reduces_unicode_context_to_keep_fitting_literals_complete() {
         assert!(excerpt.contains(&needle), "{bytes}: {page}");
         assert!(excerpt.len() <= 480);
         assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn reads_native_search_arguments_actions_and_discovered_tools() {
+    let fixture = Fixture::new();
+    // Field shapes follow Codex protocol models.rs ResponseItem variants.
+    let payloads = [
+        json!({"type":"tool_search_call","call_id":"search-1","execution":"client","arguments":{"query":"calendar create","limit":1}}),
+        json!({"type":"web_search_call","status":"completed","action":{"type":"search","queries":["calendar documentation","calendar examples"]}}),
+        json!({"type":"web_search_call","status":"completed","action":{"type":"open_page","url":"https://example.com/calendar"}}),
+        json!({"type":"web_search_call","status":"completed","action":{"type":"find_in_page","url":"https://example.com","pattern":"calendar settings"}}),
+        json!({"type":"tool_search_output","call_id":"search-1","status":"completed","execution":"client","tools":[{"type":"function","name":"calendar_create_event","description":"Create a calendar event.","parameters":{"type":"object","properties":{"title":{"type":"string"}}}}]}),
+    ];
+    fs::write(
+        fixture.0.join("session.jsonl"),
+        payloads
+            .iter()
+            .map(|payload| json!({"type":"response_item","payload":payload}).to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
+    let page = fixture.page(&["--read", "session.jsonl", "calendar"], 8192);
+    assert_eq!(page["items"].as_array().unwrap().len(), 5);
+    for (i, expected) in [
+        "calendar create",
+        "calendar documentation",
+        "https://example.com/calendar",
+        "calendar settings",
+        "calendar_create_event",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert!(page["items"][i]["text"]
+            .as_str()
+            .unwrap()
+            .contains(expected));
+        assert_eq!(page["items"][i]["line"], i + 1);
     }
 }

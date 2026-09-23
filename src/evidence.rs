@@ -200,10 +200,16 @@ fn transcript_text(row: &Value) -> Vec<(&'static str, String)> {
                 "tool_call",
                 tool_call_text(&payload["name"], &payload["input"]),
             ),
-            "tool_search_call" | "web_search_call" => {
-                ("tool_call", crate::compact_custom_tool_call(payload))
-            }
-            "function_call_output" | "custom_tool_call_output" | "tool_search_output" => {
+            "tool_search_call" => (
+                "tool_call",
+                tool_call_text(&payload["type"], &payload["arguments"]),
+            ),
+            "web_search_call" => (
+                "tool_call",
+                tool_call_text(&payload["type"], &payload["action"]),
+            ),
+            "tool_search_output" => ("tool_output", argument_text(&payload["tools"])),
+            "function_call_output" | "custom_tool_call_output" => {
                 let text = content_text(&payload["output"]);
                 (
                     "tool_output",
