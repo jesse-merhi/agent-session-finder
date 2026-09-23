@@ -115,11 +115,19 @@ fn main() {
 
 fn run() -> AppResult<()> {
     let args = env::args().skip(1).collect::<Vec<_>>();
-    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
+    let options_end = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    let option_args = &args[..options_end];
+    if option_args.iter().any(|arg| arg == "-h" || arg == "--help") {
         print_help()?;
         return Ok(());
     }
-    if args.iter().any(|arg| arg == "-V" || arg == "--version") {
+    if option_args
+        .iter()
+        .any(|arg| arg == "-V" || arg == "--version")
+    {
         println!("agent-session-find {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }

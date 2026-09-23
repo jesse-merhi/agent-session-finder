@@ -296,3 +296,112 @@ fn rejects_invalid_inputs_without_partial_output_or_index_writes() {
         assert!(!fixture.0.join("must-not-create").exists());
     }
 }
+
+#[test]
+fn retrieves_supported_tool_records_from_actual_search_result_paths() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.0.join("codex/sessions")).unwrap();
+    fs::create_dir_all(fixture.0.join("claude/transcripts")).unwrap();
+    let codex = [
+        json!({"type":"session_meta","payload":{"id":"11111111-1111-4111-8111-111111111111","cwd":"/example"}}),
+        json!({"type":"event_msg","payload":{"type":"user_message","message":"Run the build"}}),
+        json!({"type":"event_msg","payload":{"type":"exec_command_end","exit_code":1,"aggregated_output":"No such file unique_missing_file_needle"}}),
+        json!({"type":"response_item","payload":{"type":"tool_search_call","name":"lookup","input":"search_call_needle"}}),
+        json!({"type":"response_item","payload":{"type":"tool_search_output","output":"Error: search_output_needle"}}),
+    ];
+    let claude = [
+        json!({"type":"user","content":"Find the route","project":"/example"}),
+        json!({"type":"tool_use","tool_name":"grep","tool_input":{"file_path":"src/special_file.rs"}}),
+        json!({"type":"tool_result","tool_output":{"stderr":"No such file flat_result_needle"}}),
+    ];
+    for (name, rows) in [
+        ("codex/sessions/run.jsonl", codex.as_slice()),
+        ("claude/transcripts/run.jsonl", claude.as_slice()),
+    ] {
+        fs::write(
+            fixture.0.join(name),
+            rows.iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+    }
+    let indexed = fixture.run(&[
+        "--codex-home",
+        "codex",
+        "--claude-home",
+        "claude",
+        "--db",
+        "index.sqlite",
+        "index",
+    ]);
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+    for needle in [
+        "unique_missing_file_needle",
+        "special_file",
+        "flat_result_needle",
+        "search_call_needle",
+        "search_output_needle",
+    ] {
+        let search = fixture.run(&["--db", "index.sqlite", "--no-refresh", needle]);
+        assert!(
+            search.status.success(),
+            "{}",
+            String::from_utf8_lossy(&search.stderr)
+        );
+        let output = String::from_utf8(search.stdout).unwrap();
+        let source = output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("src: "))
+            .unwrap();
+        let page = fixture.page(&["--read", source, needle], 8192);
+        assert!(
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["text"].as_str().unwrap().contains(needle)),
+            "{needle}: {page}"
+        );
+    }
+}
+
+#[test]
+fn retains_a_literal_crossing_the_previous_excerpt_boundary() {
+    let fixture = Fixture::new();
+    let needle = "requirements.toml";
+    let text = format!("{needle}{}{needle}", " ".repeat(470 - needle.len()));
+    fs::write(fixture.0.join("session.jsonl"), json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":text}]}}).to_string()).unwrap();
+    let first = fixture.page(&["--read", "session.jsonl", needle, "--limit", "1"], 8192);
+    assert_eq!(first["next_offset"], 1);
+    let next = fixture.page(&["--read", "session.jsonl", needle, "--offset", "1"], 8192);
+    assert_eq!(next["items"].as_array().unwrap().len(), 1);
+    assert!(next["items"][0]["text"].as_str().unwrap().contains(needle));
+    assert_eq!(next["items"][0]["text_end"], text.len());
+    assert!(next["next_offset"].is_null());
+}
+
+#[test]
+fn treats_help_and_version_after_delimiter_as_literal_queries() {
+    let fixture = Fixture::new();
+    fs::write(fixture.0.join("session.jsonl"), json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"cargo --help --version -h -V"}]}}).to_string()).unwrap();
+    for query in ["--help", "--version", "-h", "-V"] {
+        let page = fixture.page(
+            &[
+                "--read",
+                "session.jsonl",
+                "--max-bytes",
+                "1024",
+                "--",
+                query,
+            ],
+            1024,
+        );
+        assert!(page["items"][0]["text"].as_str().unwrap().contains(query));
+    }
+}

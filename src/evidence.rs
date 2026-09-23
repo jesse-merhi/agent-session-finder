@@ -208,7 +208,10 @@ fn transcript_text(row: &Value) -> Vec<(&'static str, String)> {
                     text_at(payload, &["input"])
                 ),
             ),
-            "function_call_output" | "custom_tool_call_output" => {
+            "tool_search_call" | "web_search_call" => {
+                ("tool_call", crate::compact_custom_tool_call(payload))
+            }
+            "function_call_output" | "custom_tool_call_output" | "tool_search_output" => {
                 let text = content_text(&payload["output"]);
                 (
                     "tool_output",
@@ -227,16 +230,24 @@ fn transcript_text(row: &Value) -> Vec<(&'static str, String)> {
         return match payload["type"].as_str() {
             Some("user_message") => vec![("user", text_at(payload, &["message"]))],
             Some("agent_message") => vec![("assistant", text_at(payload, &["message"]))],
+            Some("exec_command_end") => {
+                vec![("tool_output", crate::event_msg_tool_output(payload))]
+            }
             _ => Vec::new(),
         };
     }
     let role = match row["type"].as_str() {
         Some("user") => "user",
         Some("assistant") => "assistant",
+        Some("tool_use") => return vec![("tool_call", crate::compact_claude_tool(row))],
+        Some("tool_result") => return vec![("tool_output", crate::claude_tool_output(row))],
         _ => return Vec::new(),
     };
     let mut result = vec![(role, crate::claude_message_text(row))];
-    if let Some(parts) = row["message"]["content"].as_array() {
+    if let Some(parts) = row["message"]["content"]
+        .as_array()
+        .or_else(|| row["content"].as_array())
+    {
         for part in parts {
             match part["type"].as_str() {
                 Some("tool_use") => result.push((
@@ -268,7 +279,7 @@ fn add_passages(
         Box::new(text.match_indices(query).map(|(start, _)| start))
     };
     for position in matches {
-        if position < previous_end {
+        if position < previous_end && position + query.len() <= previous_end {
             continue;
         }
         let start = previous_char_boundary(text, position.saturating_sub(96));
