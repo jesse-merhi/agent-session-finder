@@ -518,7 +518,13 @@ fn reads_wrapped_and_current_tool_output_as_verbatim_text() {
 #[test]
 fn keeps_plain_json_tool_output_when_it_is_not_a_text_envelope() {
     let fixture = Fixture::new();
-    for text in [r#"[1,2,"value"]"#, r#"{"content":[1,2]}"#, r#"{"count":3}"#] {
+    for text in [
+        r#"[1,2,"value"]"#,
+        r#"{"content":[1,2]}"#,
+        r#"{"count":3}"#,
+        r#"{"output":"Build completed","artifact":"dist/release-bundle.tar.gz"}"#,
+        r#"{"content":[{"type":"text","text":"Build completed"}],"artifact":"dist/release-bundle.tar.gz"}"#,
+    ] {
         fs::write(
             fixture.0.join("session.jsonl"),
             json!({"type":"response_item","payload":{"type":"function_call_output","output":text}})
@@ -527,6 +533,28 @@ fn keeps_plain_json_tool_output_when_it_is_not_a_text_envelope() {
         .unwrap();
         let page = fixture.page(&["--read", "session.jsonl", text], 8192);
         assert_eq!(page["items"][0]["text"], text);
+    }
+}
+
+#[test]
+fn retrieves_notification_siblings_without_mistaking_them_for_envelopes() {
+    let fixture = Fixture::new();
+    let artifact = "dist/release-bundle.tar.gz";
+    for key in ["output", "preview", "error", "stderr"] {
+        let text = json!({key:"Build completed","artifact":artifact}).to_string();
+        fs::write(
+            fixture.0.join("session.jsonl"),
+            json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"notification-1","output":text}}).to_string(),
+        )
+        .unwrap();
+        for query in [artifact, ""] {
+            let page = fixture.page(&["--read", "session.jsonl", query], 8192);
+            assert_eq!(page["items"].as_array().unwrap().len(), 1);
+            let item = &page["items"][0];
+            assert_eq!(item["text"], text);
+            assert_eq!(item["text_bytes"], text.len());
+            assert_eq!(item["truncated"], false);
+        }
     }
 }
 

@@ -73,6 +73,8 @@ Both modes return JSON with one total byte budget (8,192 by default), source
 references, and `next_offset` for another page. Pass that offset with the same
 input and query. Transcript matching uses a case-sensitive literal and keeps
 matches inside long messages; an omitted query shows the start of each message.
+Tool outputs are searched as stored first, then as decoded envelope text when
+needed for escaped literals. Text byte offsets refer to the returned representation.
 `truncated` marks shortened passages. Pagination advances between excerpts, so
 use a more specific query to inspect the hidden part of a message. Documentation
 input can be the search JSON itself or an MCP `content`/`structuredContent`

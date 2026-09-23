@@ -172,7 +172,7 @@ fn read_transcript(options: &Options, page: &mut Page<'_>) -> AppResult<()> {
         }
         let row: Value = serde_json::from_str(&line)
             .map_err(|err| format!("invalid JSON at source line {}: {err}", line_index + 1))?;
-        for (kind, text) in transcript_text(&row) {
+        for (kind, text) in transcript_text(&row, &options.query) {
             if !add_passages(page, line_index + 1, kind, &text, &options.query)? {
                 return Ok(());
             }
@@ -181,7 +181,7 @@ fn read_transcript(options: &Options, page: &mut Page<'_>) -> AppResult<()> {
     Ok(())
 }
 
-fn transcript_text(row: &Value) -> Vec<(&'static str, String)> {
+fn transcript_text(row: &Value, query: &str) -> Vec<(&'static str, String)> {
     let payload = &row["payload"];
     if row["type"] == "response_item" {
         let entry = match payload["type"].as_str().unwrap_or_default() {
@@ -208,7 +208,7 @@ fn transcript_text(row: &Value) -> Vec<(&'static str, String)> {
             ),
             "tool_search_output" => ("tool_output", argument_text(&payload["tools"])),
             "function_call_output" | "custom_tool_call_output" => {
-                ("tool_output", tool_output_text(&payload["output"]))
+                ("tool_output", tool_output_text(&payload["output"], query))
             }
             _ => return Vec::new(),
         };
@@ -242,7 +242,9 @@ fn transcript_text(row: &Value) -> Vec<(&'static str, String)> {
                 tool_call_text(&row["tool_name"], &row["tool_input"]),
             )]
         }
-        Some("tool_result") => return vec![("tool_output", tool_output_text(&row["tool_output"]))],
+        Some("tool_result") => {
+            return vec![("tool_output", tool_output_text(&row["tool_output"], query))]
+        }
         _ => return Vec::new(),
     };
     let mut result = vec![(role, crate::claude_message_text(row))];
@@ -263,9 +265,16 @@ fn transcript_text(row: &Value) -> Vec<(&'static str, String)> {
     result
 }
 
-fn tool_output_text(output: &Value) -> String {
-    if output.is_array() {
-        return content_text(output);
+fn tool_output_text(output: &Value, query: &str) -> String {
+    let raw = if output.is_object() {
+        output.to_string()
+    } else {
+        content_text(output)
+    };
+    // JSON notifications can use the same keys as tool envelopes. Search the
+    // complete original text before decoding an escaped literal inside one.
+    if query.is_empty() || raw.contains(query) {
+        return raw;
     }
     let decoded = output
         .as_str()
@@ -282,18 +291,16 @@ fn tool_output_text(output: &Value) -> String {
         if let Some(text) = value
             .pointer(path)
             .and_then(Value::as_str)
-            .filter(|text| !text.is_empty())
+            .filter(|text| !text.is_empty() && text.contains(query))
         {
             return text.to_string();
         }
     }
-    if value["content"]
-        .as_array()
-        .is_some_and(|parts| parts.iter().any(|part| part["text"].is_string()))
-    {
-        return content_text(&value["content"]);
+    let content = content_text(&value["content"]);
+    if content.contains(query) {
+        return content;
     }
-    content_text(output)
+    raw
 }
 
 fn tool_call_text(name: &Value, input: &Value) -> String {
