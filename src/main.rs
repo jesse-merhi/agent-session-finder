@@ -1695,11 +1695,7 @@ fn print_results(results: &[ResultCard], query: &str, limit: usize) -> AppResult
         write_io(writeln!(stdout, "   terms: {terms}"))?;
         write_io(writeln!(stdout, "   cwd: {}", one_line(&result.cwd, 96)))?;
         write_io(writeln!(stdout, "   id:  {}", result.session_id))?;
-        write_io(writeln!(
-            stdout,
-            "   src: {}",
-            one_line(&result.source_path, 112)
-        ))?;
+        write_io(writeln!(stdout, "   src: {}", result.source_path))?;
         for hit in result.snippets.iter().take(2) {
             write_io(writeln!(stdout, "   hit: {}", one_line(hit, 140)))?;
         }

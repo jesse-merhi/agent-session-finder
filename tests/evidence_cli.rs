@@ -445,7 +445,7 @@ fn reduces_unicode_context_to_keep_fitting_literals_complete() {
 }
 
 #[test]
-fn reads_native_search_arguments_actions_and_discovered_tools() {
+fn reads_native_call_arguments_prompts_and_discovered_tools() {
     let fixture = Fixture::new();
     // Field shapes follow Codex protocol models.rs ResponseItem variants.
     let payloads = [
@@ -454,6 +454,8 @@ fn reads_native_search_arguments_actions_and_discovered_tools() {
         json!({"type":"web_search_call","status":"completed","action":{"type":"open_page","url":"https://example.com/calendar"}}),
         json!({"type":"web_search_call","status":"completed","action":{"type":"find_in_page","url":"https://example.com","pattern":"calendar settings"}}),
         json!({"type":"tool_search_output","call_id":"search-1","status":"completed","execution":"client","tools":[{"type":"function","name":"calendar_create_event","description":"Create a calendar event.","parameters":{"type":"object","properties":{"title":{"type":"string"}}}}]}),
+        json!({"type":"local_shell_call","id":"lsh-test","call_id":"shell-1","status":"completed","action":{"type":"exec","command":["sh","-c","calendar report"],"working_directory":"/example","timeout_ms":null,"env":null,"user":null}}),
+        json!({"type":"image_generation_call","id":"ig-test","status":"completed","revised_prompt":"A calendar illustration","result":"YmFzZTY0X2JpbmFyeV9wcm9iZQ=="}),
     ];
     fs::write(
         fixture.0.join("session.jsonl"),
@@ -465,13 +467,15 @@ fn reads_native_search_arguments_actions_and_discovered_tools() {
     )
     .unwrap();
     let page = fixture.page(&["--read", "session.jsonl", "calendar"], 8192);
-    assert_eq!(page["items"].as_array().unwrap().len(), 5);
+    assert_eq!(page["items"].as_array().unwrap().len(), 7);
     for (i, expected) in [
         "calendar create",
         "calendar documentation",
         "https://example.com/calendar",
         "calendar settings",
         "calendar_create_event",
+        "calendar report",
+        "A calendar illustration",
     ]
     .iter()
     .enumerate()
@@ -482,6 +486,11 @@ fn reads_native_search_arguments_actions_and_discovered_tools() {
             .contains(expected));
         assert_eq!(page["items"][i]["line"], i + 1);
     }
+    let binary = fixture.page(
+        &["--read", "session.jsonl", "YmFzZTY0X2JpbmFyeV9wcm9iZQ=="],
+        8192,
+    );
+    assert!(binary["items"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -600,4 +609,126 @@ fn preserves_whitespace_in_legacy_messages_and_command_outputs() {
         assert_eq!(item["text_bytes"], expected.len());
         assert_eq!(item["truncated"], false);
     }
+}
+
+#[test]
+fn decodes_native_mcp_headers_and_both_body_encodings() {
+    let fixture = Fixture::new();
+    let literal = "Call failed for \"migration.sql\"\n  next step";
+    let bodies = [
+        json!([{"type":"text","text":literal}]),
+        json!({"message":literal}),
+    ];
+    for header in ["Wall time: 0.0100 seconds\nOutput:\n", ""] {
+        let rows: Vec<_> = bodies
+            .iter()
+            .map(|body| json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"mcp-1","output":format!("{header}{body}")}}).to_string())
+            .collect();
+        fs::write(fixture.0.join("session.jsonl"), rows.join("\n")).unwrap();
+        for offset in 0..2 {
+            let page = fixture.page(
+                &[
+                    "--read",
+                    "session.jsonl",
+                    literal,
+                    "--limit",
+                    "1",
+                    "--offset",
+                    &offset.to_string(),
+                ],
+                8192,
+            );
+            let item = &page["items"][0];
+            assert_eq!(page["items"].as_array().unwrap().len(), 1);
+            assert!(item["text"].as_str().unwrap().contains(literal));
+            assert_eq!(item["line"], offset + 1);
+            assert_eq!(item["text_start"], 0);
+            assert_eq!(item["text_end"], item["text_bytes"]);
+            assert_eq!(item["truncated"], false);
+            if offset == 0 {
+                assert_eq!(page["next_offset"], 1);
+            } else {
+                assert!(page["next_offset"].is_null());
+            }
+        }
+    }
+}
+
+#[test]
+fn reads_worker_messages_from_full_native_search_paths() {
+    let fixture = Fixture::new();
+    let relative = "codex/sessions/2026/09/23/rollout-2026-09-23T01-02-03-11111111-1111-4111-8111-111111111111.jsonl";
+    let source = fixture.0.join(relative);
+    assert!(source.to_str().unwrap().len() > 112);
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::create_dir_all(fixture.0.join("claude")).unwrap();
+    let rows = [
+        json!({"type":"session_meta","payload":{"id":"11111111-1111-4111-8111-111111111111","cwd":"/example"}}),
+        json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Inspect report_handshake"}]}}),
+        json!({"type":"response_item","payload":{"type":"agent_message","author":"/root/worker","recipient":"/root","content":[{"type":"input_text","text":"  worker_result_probe passed\n"}]}}),
+        json!({"type":"response_item","payload":{"type":"agent_message","author":"/root/worker","recipient":"/root","content":[{"type":"input_text","text":"  worker_result_probe completed\n"}]}}),
+        json!({"type":"response_item","payload":{"type":"agent_message","author":"/root/worker","recipient":"/root","content":[{"type":"encrypted_content","encrypted_content":"worker_result_probe ciphertext"}]}}),
+    ];
+    fs::write(
+        &source,
+        rows.iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
+    let codex_home = fixture.0.join("codex");
+    let claude_home = fixture.0.join("claude");
+    let indexed = fixture.run(&[
+        "--codex-home",
+        codex_home.to_str().unwrap(),
+        "--claude-home",
+        claude_home.to_str().unwrap(),
+        "--db",
+        "index.sqlite",
+        "index",
+    ]);
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+    let search = fixture.run(&["--db", "index.sqlite", "--no-refresh", "report_handshake"]);
+    assert!(
+        search.status.success(),
+        "{}",
+        String::from_utf8_lossy(&search.stderr)
+    );
+    let output = String::from_utf8(search.stdout).unwrap();
+    let printed_source = output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("src: "))
+        .unwrap();
+    assert_eq!(printed_source, source.to_str().unwrap());
+    for offset in 0..2 {
+        let page = fixture.page(
+            &[
+                "--read",
+                printed_source,
+                "worker_result_probe",
+                "--limit",
+                "1",
+                "--offset",
+                &offset.to_string(),
+            ],
+            8192,
+        );
+        let item = &page["items"][0];
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        assert_eq!(page["source"], printed_source);
+        assert_eq!(item["line"], offset + 3);
+        assert_eq!(item["kind"], "agent_message");
+        if offset == 0 {
+            assert_eq!(page["next_offset"], 1);
+        } else {
+            assert!(page["next_offset"].is_null());
+        }
+    }
+    let all = fixture.page(&["--read", printed_source], 8192);
+    assert_eq!(all["items"].as_array().unwrap().len(), 3);
 }

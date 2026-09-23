@@ -190,6 +190,7 @@ fn transcript_text(row: &Value, query: &str) -> Vec<(&'static str, String)> {
                 Some("assistant") => ("assistant", content_text(&payload["content"])),
                 _ => return Vec::new(),
             },
+            "agent_message" => ("agent_message", content_text(&payload["content"])),
             "function_call" => (
                 "tool_call",
                 tool_call_text(&payload["name"], &payload["arguments"]),
@@ -202,10 +203,11 @@ fn transcript_text(row: &Value, query: &str) -> Vec<(&'static str, String)> {
                 "tool_call",
                 tool_call_text(&payload["type"], &payload["arguments"]),
             ),
-            "web_search_call" => (
+            "web_search_call" | "local_shell_call" => (
                 "tool_call",
                 tool_call_text(&payload["type"], &payload["action"]),
             ),
+            "image_generation_call" => ("tool_call", content_text(&payload["revised_prompt"])),
             "tool_search_output" => ("tool_output", argument_text(&payload["tools"])),
             "function_call_output" | "custom_tool_call_output" => {
                 ("tool_output", tool_output_text(&payload["output"], query))
@@ -276,9 +278,13 @@ fn tool_output_text(output: &Value, query: &str) -> String {
     if query.is_empty() || raw.contains(query) {
         return raw;
     }
-    let decoded = output
-        .as_str()
-        .and_then(|text| serde_json::from_str::<Value>(text).ok());
+    let json_body = if raw.starts_with("Wall time: ") {
+        raw.split_once("\nOutput:\n")
+            .map_or(raw.as_str(), |(_, body)| body)
+    } else {
+        raw.as_str()
+    };
+    let decoded = serde_json::from_str::<Value>(json_body).ok();
     let value = decoded.as_ref().unwrap_or(output);
     // Index helpers normalize whitespace; literal reads need the verbatim text.
     for path in [
@@ -296,9 +302,19 @@ fn tool_output_text(output: &Value, query: &str) -> String {
             return text.to_string();
         }
     }
-    let content = content_text(&value["content"]);
+    let content = if value.is_array() {
+        content_text(value)
+    } else {
+        content_text(&value["content"])
+    };
     if content.contains(query) {
         return content;
+    }
+    if let Some(value) = decoded {
+        let text = argument_text(&value);
+        if text.contains(query) {
+            return text;
+        }
     }
     raw
 }
