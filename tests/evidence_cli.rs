@@ -405,3 +405,45 @@ fn treats_help_and_version_after_delimiter_as_literal_queries() {
         assert!(page["items"][0]["text"].as_str().unwrap().contains(query));
     }
 }
+
+#[test]
+fn matches_decoded_quotes_and_newlines_in_tool_inputs() {
+    let fixture = Fixture::new();
+    let command = "grep -F \"requirements.toml\" Cargo.toml\nprintf 'done'";
+    let input = json!({"cmd":command,"nested":{"argv":[command]}});
+    let rows = [
+        json!({"type":"response_item","payload":{"type":"function_call","name":"exec","arguments":input.to_string()}}),
+        json!({"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":command}}),
+        json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":command}}]}}),
+        json!({"type":"tool_use","tool_name":"Bash","tool_input":{"command":command}}),
+    ];
+    fs::write(
+        fixture.0.join("session.jsonl"),
+        rows.iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
+    let page = fixture.page(&["--read", "session.jsonl", command], 8192);
+    let items = page["items"].as_array().unwrap();
+    assert_eq!(items.len(), 4);
+    assert!(items
+        .iter()
+        .all(|item| item["text"].as_str().unwrap().contains(command)));
+}
+
+#[test]
+fn reduces_unicode_context_to_keep_fitting_literals_complete() {
+    let fixture = Fixture::new();
+    for bytes in [385, 448, 479, 480] {
+        let needle = "x".repeat(bytes);
+        let text = format!("{}{needle} suffix", "界🙂".repeat(30));
+        fs::write(fixture.0.join("session.jsonl"), json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":text}]}}).to_string()).unwrap();
+        let page = fixture.page(&["--read", "session.jsonl", &needle], 8192);
+        let excerpt = page["items"][0]["text"].as_str().unwrap();
+        assert!(excerpt.contains(&needle), "{bytes}: {page}");
+        assert!(excerpt.len() <= 480);
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    }
+}

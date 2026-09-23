@@ -194,19 +194,11 @@ fn transcript_text(row: &Value) -> Vec<(&'static str, String)> {
             },
             "function_call" => (
                 "tool_call",
-                format!(
-                    "{}\n{}",
-                    text_at(payload, &["name"]),
-                    text_at(payload, &["arguments"])
-                ),
+                tool_call_text(&payload["name"], &payload["arguments"]),
             ),
             "custom_tool_call" => (
                 "tool_call",
-                format!(
-                    "{}\n{}",
-                    text_at(payload, &["name"]),
-                    text_at(payload, &["input"])
-                ),
+                tool_call_text(&payload["name"], &payload["input"]),
             ),
             "tool_search_call" | "web_search_call" => {
                 ("tool_call", crate::compact_custom_tool_call(payload))
@@ -239,7 +231,12 @@ fn transcript_text(row: &Value) -> Vec<(&'static str, String)> {
     let role = match row["type"].as_str() {
         Some("user") => "user",
         Some("assistant") => "assistant",
-        Some("tool_use") => return vec![("tool_call", crate::compact_claude_tool(row))],
+        Some("tool_use") => {
+            return vec![(
+                "tool_call",
+                tool_call_text(&row["tool_name"], &row["tool_input"]),
+            )]
+        }
         Some("tool_result") => return vec![("tool_output", crate::claude_tool_output(row))],
         _ => return Vec::new(),
     };
@@ -250,16 +247,43 @@ fn transcript_text(row: &Value) -> Vec<(&'static str, String)> {
     {
         for part in parts {
             match part["type"].as_str() {
-                Some("tool_use") => result.push((
-                    "tool_call",
-                    format!("{}\n{}", text_at(part, &["name"]), part["input"]),
-                )),
+                Some("tool_use") => {
+                    result.push(("tool_call", tool_call_text(&part["name"], &part["input"])))
+                }
                 Some("tool_result") => result.push(("tool_output", content_text(&part["content"]))),
                 _ => {}
             }
         }
     }
     result
+}
+
+fn tool_call_text(name: &Value, input: &Value) -> String {
+    let decoded = input
+        .as_str()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok());
+    format!(
+        "{}\n{}",
+        name.as_str().unwrap_or_default(),
+        argument_text(decoded.as_ref().unwrap_or(input))
+    )
+}
+
+fn argument_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .map(argument_text)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Object(fields) => fields
+            .iter()
+            .map(|(key, value)| format!("{key}: {}", argument_text(value)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => value.to_string(),
+    }
 }
 
 fn add_passages(
@@ -282,7 +306,11 @@ fn add_passages(
         if position < previous_end && position + query.len() <= previous_end {
             continue;
         }
-        let start = previous_char_boundary(text, position.saturating_sub(96));
+        let context_bytes = 480_usize.saturating_sub(query.len()).min(96);
+        let mut start = position.saturating_sub(context_bytes);
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
         let end = previous_char_boundary(text, (start + 480).min(text.len()));
         previous_end = end;
         if !page.push(json!({
