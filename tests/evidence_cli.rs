@@ -483,3 +483,49 @@ fn reads_native_search_arguments_actions_and_discovered_tools() {
         assert_eq!(page["items"][i]["line"], i + 1);
     }
 }
+
+#[test]
+fn reads_wrapped_and_current_tool_output_as_verbatim_text() {
+    let fixture = Fixture::new();
+    let text = "\n  Success. Updated \"file.txt\":\n  M file.txt\n";
+    let outputs = [
+        json!(json!({"output":text,"metadata":{"exit_code":0,"duration_seconds":0.1}}).to_string()),
+        json!({"stderr":text}),
+        json!({"output":"","metadata":{"stderr":text}}),
+        json!([{ "type":"input_text", "text":text }]),
+        json!(text),
+        json!(json!({"content":[{"type":"text","text":text}]}).to_string()),
+    ];
+    for kind in ["function_call_output", "custom_tool_call_output"] {
+        for output in &outputs {
+            fs::write(
+                fixture.0.join("session.jsonl"),
+                json!({"type":"response_item","payload":{"type":kind,"output":output}}).to_string(),
+            )
+            .unwrap();
+            let page = fixture.page(&["--read", "session.jsonl", text], 8192);
+            assert_eq!(
+                page["items"].as_array().unwrap().len(),
+                1,
+                "{kind}: {output}"
+            );
+            assert_eq!(page["items"][0]["text"], text);
+            assert_eq!(page["items"][0]["text_bytes"], text.len());
+        }
+    }
+}
+
+#[test]
+fn keeps_plain_json_tool_output_when_it_is_not_a_text_envelope() {
+    let fixture = Fixture::new();
+    for text in [r#"[1,2,"value"]"#, r#"{"content":[1,2]}"#, r#"{"count":3}"#] {
+        fs::write(
+            fixture.0.join("session.jsonl"),
+            json!({"type":"response_item","payload":{"type":"function_call_output","output":text}})
+                .to_string(),
+        )
+        .unwrap();
+        let page = fixture.page(&["--read", "session.jsonl", text], 8192);
+        assert_eq!(page["items"][0]["text"], text);
+    }
+}

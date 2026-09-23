@@ -210,15 +210,7 @@ fn transcript_text(row: &Value) -> Vec<(&'static str, String)> {
             ),
             "tool_search_output" => ("tool_output", argument_text(&payload["tools"])),
             "function_call_output" | "custom_tool_call_output" => {
-                let text = content_text(&payload["output"]);
-                (
-                    "tool_output",
-                    if text.is_empty() {
-                        crate::custom_tool_output_text(payload)
-                    } else {
-                        text
-                    },
-                )
+                ("tool_output", tool_output_text(&payload["output"]))
             }
             _ => return Vec::new(),
         };
@@ -262,6 +254,33 @@ fn transcript_text(row: &Value) -> Vec<(&'static str, String)> {
         }
     }
     result
+}
+
+fn tool_output_text(output: &Value) -> String {
+    if output.is_array() {
+        return content_text(output);
+    }
+    let decoded = output
+        .as_str()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok());
+    let value = decoded.as_ref().unwrap_or(output);
+    // Index helpers normalize whitespace; literal reads need the verbatim text.
+    for path in ["/output", "/error", "/stderr", "/metadata/stderr"] {
+        if let Some(text) = value
+            .pointer(path)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+        {
+            return text.to_string();
+        }
+    }
+    if value["content"]
+        .as_array()
+        .is_some_and(|parts| parts.iter().any(|part| part["text"].is_string()))
+    {
+        return content_text(&value["content"]);
+    }
+    content_text(output)
 }
 
 fn tool_call_text(name: &Value, input: &Value) -> String {
