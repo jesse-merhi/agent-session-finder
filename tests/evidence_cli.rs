@@ -529,3 +529,47 @@ fn keeps_plain_json_tool_output_when_it_is_not_a_text_envelope() {
         assert_eq!(page["items"][0]["text"], text);
     }
 }
+
+#[test]
+fn preserves_whitespace_in_legacy_messages_and_command_outputs() {
+    let fixture = Fixture::new();
+    let text = "  error: boundary_probe\n";
+    let mut cases = vec![
+        (
+            json!({"type":"event_msg","payload":{"type":"user_message","message":text}}),
+            text.to_string(),
+        ),
+        (
+            json!({"type":"event_msg","payload":{"type":"agent_message","message":text}}),
+            text.to_string(),
+        ),
+        (json!({"type":"user","content":text}), text.to_string()),
+        (
+            json!({"type":"assistant","message":{"content":text}}),
+            text.to_string(),
+        ),
+    ];
+    for field in ["aggregated_output", "formatted_output", "stderr", "stdout"] {
+        cases.push((
+            json!({"type":"event_msg","payload":{"type":"exec_command_end","exit_code":1,field:text}}),
+            format!("Exit code: 1\n{text}"),
+        ));
+    }
+    for field in ["output", "preview", "error", "stderr"] {
+        cases.push((
+            json!({"type":"tool_result","tool_output":{field:text}}),
+            text.to_string(),
+        ));
+    }
+    for (row, expected) in cases {
+        fs::write(fixture.0.join("session.jsonl"), row.to_string()).unwrap();
+        let page = fixture.page(&["--read", "session.jsonl", text], 8192);
+        assert_eq!(page["items"].as_array().unwrap().len(), 1, "{row}");
+        let item = &page["items"][0];
+        assert_eq!(item["text"], expected, "{row}");
+        assert_eq!(item["text_start"], 0);
+        assert_eq!(item["text_end"], expected.len());
+        assert_eq!(item["text_bytes"], expected.len());
+        assert_eq!(item["truncated"], false);
+    }
+}

@@ -1,6 +1,4 @@
-use crate::{
-    content_text, previous_char_boundary, required_arg, text_at, trim, write_io, AppResult,
-};
+use crate::{content_text, previous_char_boundary, required_arg, trim, write_io, AppResult};
 use serde_json::{json, Value};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
@@ -218,10 +216,19 @@ fn transcript_text(row: &Value) -> Vec<(&'static str, String)> {
     }
     if row["type"] == "event_msg" {
         return match payload["type"].as_str() {
-            Some("user_message") => vec![("user", text_at(payload, &["message"]))],
-            Some("agent_message") => vec![("assistant", text_at(payload, &["message"]))],
+            Some("user_message") => vec![("user", content_text(&payload["message"]))],
+            Some("agent_message") => vec![("assistant", content_text(&payload["message"]))],
             Some("exec_command_end") => {
-                vec![("tool_output", crate::event_msg_tool_output(payload))]
+                let mut parts = Vec::new();
+                if let Some(code) = crate::event_msg_exit_code(payload).filter(|code| *code != 0) {
+                    parts.push(format!("Exit code: {code}"));
+                }
+                for key in ["aggregated_output", "formatted_output", "stderr", "stdout"] {
+                    if let Some(text) = payload[key].as_str().filter(|text| !text.is_empty()) {
+                        parts.push(text.to_string());
+                    }
+                }
+                vec![("tool_output", parts.join("\n"))]
             }
             _ => Vec::new(),
         };
@@ -235,7 +242,7 @@ fn transcript_text(row: &Value) -> Vec<(&'static str, String)> {
                 tool_call_text(&row["tool_name"], &row["tool_input"]),
             )]
         }
-        Some("tool_result") => return vec![("tool_output", crate::claude_tool_output(row))],
+        Some("tool_result") => return vec![("tool_output", tool_output_text(&row["tool_output"]))],
         _ => return Vec::new(),
     };
     let mut result = vec![(role, crate::claude_message_text(row))];
@@ -265,7 +272,13 @@ fn tool_output_text(output: &Value) -> String {
         .and_then(|text| serde_json::from_str::<Value>(text).ok());
     let value = decoded.as_ref().unwrap_or(output);
     // Index helpers normalize whitespace; literal reads need the verbatim text.
-    for path in ["/output", "/error", "/stderr", "/metadata/stderr"] {
+    for path in [
+        "/output",
+        "/preview",
+        "/error",
+        "/stderr",
+        "/metadata/stderr",
+    ] {
         if let Some(text) = value
             .pointer(path)
             .and_then(Value::as_str)
