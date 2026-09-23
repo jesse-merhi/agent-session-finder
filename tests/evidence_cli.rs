@@ -732,3 +732,37 @@ fn reads_worker_messages_from_full_native_search_paths() {
     let all = fixture.page(&["--read", printed_source], 8192);
     assert_eq!(all["items"].as_array().unwrap().len(), 3);
 }
+
+#[test]
+fn decodes_nested_claude_mcp_text_blocks() {
+    let fixture = Fixture::new();
+    let literal = "Call failed for \"migration.sql\"\n  next step";
+    let body = json!({"message":literal}).to_string();
+    let blocks = [
+        json!([{ "type":"text", "text":body }]),
+        json!([{ "type":"text", "text":"MCP result follows" }, { "type":"text", "text":body }]),
+    ];
+    for content in blocks {
+        let rows = [
+            json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"mcp-1","content":content}]}}),
+            json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"mcp-1","output":json!({"content":content}).to_string()}}),
+        ];
+        fs::write(
+            fixture.0.join("session.jsonl"),
+            rows.iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let page = fixture.page(&["--read", "session.jsonl", literal], 8192);
+        assert_eq!(page["items"].as_array().unwrap().len(), 2);
+        for (i, item) in page["items"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(item["line"], i + 1);
+            assert_eq!(item["kind"], "tool_output");
+            assert!(item["text"].as_str().unwrap().contains(literal));
+            assert_eq!(item["text_bytes"], item["text"].as_str().unwrap().len());
+            assert_eq!(item["truncated"], false);
+        }
+    }
+}

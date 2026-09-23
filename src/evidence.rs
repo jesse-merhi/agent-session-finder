@@ -259,7 +259,9 @@ fn transcript_text(row: &Value, query: &str) -> Vec<(&'static str, String)> {
                 Some("tool_use") => {
                     result.push(("tool_call", tool_call_text(&part["name"], &part["input"])))
                 }
-                Some("tool_result") => result.push(("tool_output", content_text(&part["content"]))),
+                Some("tool_result") => {
+                    result.push(("tool_output", tool_output_text(&part["content"], query)))
+                }
                 _ => {}
             }
         }
@@ -277,6 +279,9 @@ fn tool_output_text(output: &Value, query: &str) -> String {
     // complete original text before decoding an escaped literal inside one.
     if query.is_empty() || raw.contains(query) {
         return raw;
+    }
+    if output.is_array() {
+        return decoded_content_text(output, query);
     }
     let json_body = if raw.starts_with("Wall time: ") {
         raw.split_once("\nOutput:\n")
@@ -303,9 +308,9 @@ fn tool_output_text(output: &Value, query: &str) -> String {
         }
     }
     let content = if value.is_array() {
-        content_text(value)
+        decoded_content_text(value, query)
     } else {
-        content_text(&value["content"])
+        decoded_content_text(&value["content"], query)
     };
     if content.contains(query) {
         return content;
@@ -317,6 +322,18 @@ fn tool_output_text(output: &Value, query: &str) -> String {
         }
     }
     raw
+}
+
+fn decoded_content_text(content: &Value, query: &str) -> String {
+    let Some(parts) = content.as_array() else {
+        return content_text(content);
+    };
+    parts
+        .iter()
+        .filter_map(|part| part.get("text").filter(|text| text.is_string()))
+        .map(|text| tool_output_text(text, query))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn tool_call_text(name: &Value, input: &Value) -> String {
