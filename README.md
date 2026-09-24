@@ -61,6 +61,34 @@ agent-skill-validate skills/session-recall
 
 No match is a non-zero exit so scripts can distinguish it from success.
 
+After selecting a session, read excerpts from its `src` path without opening or
+refreshing the index:
+
+```sh
+agent-session-find --read /path/to/session.jsonl 'requirements.toml'
+agent-session-find --compact-docs /path/to/saved-doc-search.json --max-bytes 4096
+```
+
+Both modes return JSON with one total byte budget (8,192 by default), source
+references, and `next_offset` for another page. Pass that offset with the same
+input and query. Transcript matching uses a case-sensitive literal and keeps
+matches inside long messages; an omitted query shows the start of each message.
+Reads include user/assistant messages, worker communications, and tool calls and
+results. Session metadata, system/developer instructions, reasoning records,
+encrypted content, and image/audio payloads are excluded.
+Tool outputs are searched as stored first, then as decoded envelope text when
+needed for escaped literals. Text byte offsets refer to the returned representation.
+`truncated` marks shortened passages. Pagination advances between excerpts, so
+use a more specific query to inspect the hidden part of a message. Documentation
+input can be the search JSON itself or an MCP `content`/`structuredContent`
+response. Cards retain full URLs and project titles and short excerpts instead
+of repeating full page content and highlights. The `search` field retains
+upstream pagination separately from pagination through the supplied hits.
+
+Read modes leave input files unchanged and never access the session index.
+An empty page is a successful read; invalid input or an item that cannot fit
+the requested budget exits nonzero without partial JSON. See `--help` for limits.
+
 ## Configuration
 
 Environment variables:

@@ -7,6 +7,8 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod evidence;
+
 const MAX_BODY_CHARS: usize = 6_000;
 const CONTEXT_DOCS: usize = 3;
 const MAX_STANDALONE_ERRORS: usize = 5;
@@ -113,12 +115,23 @@ fn main() {
 
 fn run() -> AppResult<()> {
     let args = env::args().skip(1).collect::<Vec<_>>();
-    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
+    let options_end = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    let option_args = &args[..options_end];
+    if option_args.iter().any(|arg| arg == "-h" || arg == "--help") {
         print_help()?;
         return Ok(());
     }
-    if args.iter().any(|arg| arg == "-V" || arg == "--version") {
+    if option_args
+        .iter()
+        .any(|arg| arg == "-V" || arg == "--version")
+    {
         println!("agent-session-find {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if evidence::run_if_requested(&args)? {
         return Ok(());
     }
     let config = parse_args(args)?;
@@ -306,6 +319,7 @@ fn print_help() -> AppResult<()> {
         stdout,
         "Local lightweight session finder for Codex and Claude logs."
     ))?;
+    write_io(writeln!(stdout, "\nRead local evidence without opening the index:\n  --read PATH [TEXT]      Read Codex/Claude JSONL; TEXT is a case-sensitive literal\n  --compact-docs PATH     Project saved documentation search JSON or an MCP response\n  --max-bytes N           Complete JSON output budget, including newline (default: 8192; minimum: 1024)\n  --offset N              Resume at next_offset with the same file and query (default: 0)\n  --limit N               Maximum excerpts/hits per page (default: 10)\n\nRead output has source references, truncated markers and next_offset (null at EOF).\nReads include user/assistant messages, worker communications, and tool calls/results.\nSession metadata, system/developer instructions, reasoning records, encrypted\ncontent, and image/audio payloads are excluded.\nTranscript excerpts contain up to 480 UTF-8 bytes around each match, or the start\nof each message when TEXT is omitted. --offset pages excerpts, not the hidden\ntail of an individual excerpt; narrow TEXT to inspect another passage.\nDocumentation cards contain title, full URL and up to 240 excerpt bytes; search\nmetadata preserves upstream pagination separately from local next_offset.\n\nExamples:\n  agent-session-find --read /path/from/search.jsonl 'requirements.toml'\n  agent-session-find --read /path/from/search.jsonl --offset 10 'requirements.toml'\n  agent-session-find --compact-docs /path/to/saved-search.json --max-bytes 4096"))?;
     write_io(writeln!(
         stdout,
         "\nOptions:\n  --codex-home PATH       Codex store (default: $CODEX_HOME or ~/.codex)\n  --claude-home PATH      Claude store (default: $CLAUDE_CONFIG_DIR or ~/.claude)\n  --db PATH               SQLite index path\n  --source SOURCE         all, codex, or claude (default: all)\n  --cwd TEXT              Restrict matches by working directory\n  --since DURATION        Restrict results by age (for example 6h, 2d, 1w)\n  --index-since DURATION  Restrict indexing by source age\n  --max-sources N         Bound sources processed during indexing\n  --workers               Include worker/subagent sessions\n  --no-archived           Exclude archived Codex sessions\n  --no-refresh            Search the existing index without refreshing\n  --limit N               Maximum results (default: 10)\n  -h, --help              Show help\n  -V, --version           Show version"
@@ -1681,11 +1695,7 @@ fn print_results(results: &[ResultCard], query: &str, limit: usize) -> AppResult
         write_io(writeln!(stdout, "   terms: {terms}"))?;
         write_io(writeln!(stdout, "   cwd: {}", one_line(&result.cwd, 96)))?;
         write_io(writeln!(stdout, "   id:  {}", result.session_id))?;
-        write_io(writeln!(
-            stdout,
-            "   src: {}",
-            one_line(&result.source_path, 112)
-        ))?;
+        write_io(writeln!(stdout, "   src: {}", result.source_path))?;
         for hit in result.snippets.iter().take(2) {
             write_io(writeln!(stdout, "   hit: {}", one_line(hit, 140)))?;
         }
